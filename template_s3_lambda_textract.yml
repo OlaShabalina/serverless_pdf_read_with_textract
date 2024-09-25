@@ -78,6 +78,10 @@ Resources:
         ZipFile: |
           import json
           import boto3
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
 
           def handler(event, context):
               s3 = boto3.client('s3')
@@ -87,39 +91,42 @@ Resources:
                   bucket = record['s3']['bucket']['name']
                   key = record['s3']['object']['key']
 
-                  # Call Textract
-                  response = textract.detect_document_text(
-                      Document={
-                          'S3Object': {
-                              'Bucket': bucket,
-                              'Name': key
+                  try:
+                      # Call Textract
+                      response = textract.detect_document_text(
+                          Document={
+                              'S3Object': {
+                                  'Bucket': bucket,
+                                  'Name': key
+                              }
                           }
-                      }
-                  )
+                      )
+                      
+                      # Extract detected text
+                      detected_text = []
+                      for item in response.get('Blocks', []):
+                          if item['BlockType'] == 'LINE':
+                              detected_text.append(item['Text'])
+                      
+                      # Join detected text into a single string
+                      text_output = "\n".join(detected_text)
+
+                      # Create a new key for the output text file
+                      output_key = f"processed/{key.split('/')[-1].replace('.jpg', '.txt')}"  # Change the extension to .txt
+
+                      # Write the detected text to the S3 bucket
+                      s3.put_object(
+                          Bucket=bucket,
+                          Key=output_key,
+                          Body=text_output
+                      )
+
+                      logger.info(f"Detected Text written to: {output_key}")
                   
-                  print(f"Bucket: {bucket}, Key: {key}")
+                  except Exception as e:
+                      logger.error(f"Error processing file {key} from bucket {bucket}: {str(e)}")
+                      continue
 
-                  # Extract detected text
-                  detected_text = []
-                  for item in response.get('Blocks', []):
-                      if item['BlockType'] == 'LINE':
-                          detected_text.append(item['Text'])
-                  
-                  # Join detected text into a single string
-                  text_output = "\n".join(detected_text)
-
-                  # Create a new key for the output text file
-                  output_key = f"processed/{key.split('/')[-1].replace('.jpg', '.txt')}"  # Change the extension to .txt
-
-                  # Write the detected text to the S3 bucket
-                  s3.put_object(
-                      Bucket=bucket,
-                      Key=output_key,
-                      Body=text_output
-                  )
-
-                  print(f"Detected Text written to: {output_key}")
-              
               return {
                   'statusCode': 200,
                   'body': json.dumps('Textract processing complete!')
