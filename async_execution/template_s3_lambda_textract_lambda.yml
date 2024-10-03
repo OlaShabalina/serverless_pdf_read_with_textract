@@ -1,0 +1,202 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template to create an S3 bucket and a Lambda function triggered by S3 events.
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: The name of the S3 bucket.
+  DocProcessingLambdaFunctionName:
+    Type: String
+    Description: The name of the Lambda function.
+  PostProcessingLambdaFunctionName:
+    Type: String
+    Description: The name of the Lambda function for post-processing.
+  TextractSNSTriggerRoleName:
+    Type: String
+    Description: The name of the IAM role for Textract SNS trigger.
+
+Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: incoming/
+            Function: !GetAtt DocProcessingLambdaFunction.Arn
+
+  S3InvokeDocLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref DocProcessingLambdaFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub arn:aws:s3:::${BucketName}
+  
+  DocProcessingLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: logs
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: '*'
+        - PolicyName: s3
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action:
+                - s3:Get*
+              Resource:
+                - !Sub arn:aws:s3:::${BucketName}
+                - !Sub arn:aws:s3:::${BucketName}/*
+        - PolicyName: textract
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - textract:StartDocumentTextDetection
+                Resource: '*'
+  
+  DocProcessingLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref DocProcessingLambdaFunctionName
+      Handler: index.handler
+      Runtime: python3.12
+      Code: ../src/doc_processing_lambda
+      Role: !GetAtt DocProcessingLambdaExecutionRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          TEXTRACT_NOTIFICATION_TOPIC: !Ref TextractNotificationTopic
+          TEXTRACT_ROLE_ARN: !GetAtt TextractSNSTriggerRole.Arn
+  
+  DocProcessingLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${DocProcessingLambdaFunctionName}'
+      RetentionInDays: 7
+ # Setting up topic first as we need to pass its arn to lambda function
+  TextractNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: Textract Notification Topic
+  
+  TextractSNSTriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref TextractSNSTriggerRoleName
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: textract.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: TextractSNSPublishPolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref TextractNotificationTopic
+
+  
+  
+  PostProcessingLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: logs
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: '*'
+        - PolicyName: s3
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+              Resource:
+                - !Sub arn:aws:s3:::${BucketName}
+                - !Sub arn:aws:s3:::${BucketName}/*
+        - PolicyName: textract
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - textract:GetDocumentTextDetection
+                Resource: '*'
+        - PolicyName: sns
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:subscribe
+                Resource: !Ref TextractNotificationTopic
+  
+  PostProcessingLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref PostProcessingLambdaFunctionName
+      Handler: index.handler
+      Runtime: python3.12
+      Code: ../src/post_processing_lambda
+      Role: !GetAtt PostProcessingLambdaExecutionRole.Arn
+      Timeout: 10
+
+  PostProcessingLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${PostProcessingLambdaFunctionName}'
+      RetentionInDays: 7
+
+  S3InvokePostLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PostProcessingLambdaFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref TextractNotificationTopic
+  
+  PostProcessingLambdaSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: lambda
+      TopicArn: !Ref TextractNotificationTopic
+      Endpoint: !GetAtt PostProcessingLambdaFunction.Arn
+
